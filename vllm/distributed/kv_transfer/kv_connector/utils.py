@@ -552,6 +552,13 @@ class TransferTopology:
         Pure math based on local/remote TP sizes — does not require
         the remote engine to be registered yet.
         """
+        if self.is_mla:
+            # MLA KV is replicated across TP ranks. Prefer same-rank pairing
+            # when possible so heterogeneous P/D TP sizes avoid redundant
+            # cross-rank handshakes and transfers.
+            if self.tp_rank < remote_tp_size:
+                return [self.tp_rank]
+            return []
         tp_ratio = self.tp_ratio(remote_tp_size)
         if tp_ratio > 0:
             return [self.tp_rank // tp_ratio]
@@ -564,6 +571,10 @@ class TransferTopology:
         multiple remote ranks.
         """
         info = self._engines[remote_engine_id]
+        if self.is_mla:
+            if self.tp_rank < info.remote_tp_size:
+                return [self.tp_rank]
+            return []
         tp_ratio = self.tp_ratio(info.remote_tp_size)
         if tp_ratio > 0:
             return [self.tp_rank // tp_ratio]

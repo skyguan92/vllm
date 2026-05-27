@@ -17,6 +17,43 @@ import regex as re
 _EXPERT_ID_RE = re.compile(r"\.experts\.(\d+)\.")
 
 
+def resolve_ep_weight_filter_placement(
+    placement: str,
+    *,
+    num_expert_group: int | None = None,
+    num_redundant_experts: int = 0,
+    enable_eplb: bool = False,
+    all2all_backend: str = "allgather_reducescatter",
+    use_all2all_kernels: bool = True,
+) -> str:
+    """Return the expert placement the weight filter must mirror.
+
+    The filter runs before FusedMoE layers load their weights. If it uses the
+    user-requested placement while FusedMoE later falls back to another
+    placement, the loader can silently skip the weights the local rank actually
+    expects. Keep this logic aligned with FusedMoE's placement support checks.
+    """
+    if placement != "round_robin":
+        return placement
+
+    round_robin_supported = (
+        num_expert_group is not None
+        and num_expert_group > 1
+        and num_redundant_experts == 0
+        and not enable_eplb
+    )
+    if not round_robin_supported:
+        return "linear"
+
+    if use_all2all_kernels and all2all_backend not in (
+        "deepep_low_latency",
+        "nixl_ep",
+    ):
+        return "linear"
+
+    return "round_robin"
+
+
 def parse_expert_id(weight_name: str) -> int | None:
     """Return the expert id embedded in *weight_name*, or ``None`` if it is
     not an per-expert weight.

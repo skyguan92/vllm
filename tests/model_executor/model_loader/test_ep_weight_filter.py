@@ -12,6 +12,7 @@ import torch
 from vllm.model_executor.model_loader.ep_weight_filter import (
     compute_local_expert_ids,
     parse_expert_id,
+    resolve_ep_weight_filter_placement,
     should_skip_weight,
 )
 from vllm.model_executor.model_loader.weight_utils import (
@@ -155,6 +156,55 @@ class TestComputeLocalExpertIds:
         assert ids_1 == {1, 4, 7}
         assert ids_2 == {2, 5, 8}
         assert ids_0 | ids_1 | ids_2 == set(range(10))
+
+
+class TestResolveEpWeightFilterPlacement:
+    def test_linear_stays_linear(self):
+        assert resolve_ep_weight_filter_placement("linear") == "linear"
+
+    def test_kimi_plain_moe_round_robin_falls_back(self):
+        placement = resolve_ep_weight_filter_placement(
+            "round_robin",
+            num_expert_group=1,
+            num_redundant_experts=0,
+            enable_eplb=False,
+            all2all_backend="allgather_reducescatter",
+            use_all2all_kernels=True,
+        )
+        assert placement == "linear"
+
+    def test_ag_rs_round_robin_falls_back_even_for_grouped_moe(self):
+        placement = resolve_ep_weight_filter_placement(
+            "round_robin",
+            num_expert_group=8,
+            num_redundant_experts=0,
+            enable_eplb=False,
+            all2all_backend="allgather_reducescatter",
+            use_all2all_kernels=True,
+        )
+        assert placement == "linear"
+
+    def test_deepep_ll_grouped_round_robin_is_kept(self):
+        placement = resolve_ep_weight_filter_placement(
+            "round_robin",
+            num_expert_group=8,
+            num_redundant_experts=0,
+            enable_eplb=False,
+            all2all_backend="deepep_low_latency",
+            use_all2all_kernels=True,
+        )
+        assert placement == "round_robin"
+
+    def test_round_robin_with_redundant_experts_falls_back(self):
+        placement = resolve_ep_weight_filter_placement(
+            "round_robin",
+            num_expert_group=8,
+            num_redundant_experts=1,
+            enable_eplb=False,
+            all2all_backend="deepep_low_latency",
+            use_all2all_kernels=True,
+        )
+        assert placement == "linear"
 
 
 # ---------------------------------------------------------------------------

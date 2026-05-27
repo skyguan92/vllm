@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.torchao import torchao_version_at_l
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.ep_weight_filter import (
     compute_local_expert_ids,
+    resolve_ep_weight_filter_placement,
 )
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
@@ -362,12 +363,33 @@ class DefaultModelLoader(BaseModelLoader):
         pcp_rank = get_pcp_group().rank_in_group if pcp_size > 1 else 0
         ep_size = dp_size * pcp_size * tp_size
         ep_rank = dp_rank * pcp_size * tp_size + pcp_rank * tp_size + tp_rank
+        text_config = model_config.hf_text_config
+        num_expert_group = getattr(text_config, "num_expert_group", None)
+        if num_expert_group is None:
+            num_expert_group = getattr(text_config, "n_group", None)
+        num_redundant_experts = parallel_config.eplb_config.num_redundant_experts
+        requested_placement = parallel_config.expert_placement_strategy
+        effective_placement = resolve_ep_weight_filter_placement(
+            requested_placement,
+            num_expert_group=num_expert_group,
+            num_redundant_experts=num_redundant_experts,
+            enable_eplb=parallel_config.enable_eplb,
+            all2all_backend=parallel_config.all2all_backend,
+            use_all2all_kernels=ep_size > 1 and parallel_config.enable_expert_parallel,
+        )
+        if effective_placement != requested_placement:
+            logger.warning_once(
+                "EP weight filter placement %s fell back to %s to match "
+                "FusedMoE effective expert placement.",
+                requested_placement,
+                effective_placement,
+            )
 
         self.local_expert_ids = compute_local_expert_ids(
             num_experts,
             ep_size,
             ep_rank,
-            placement=parallel_config.expert_placement_strategy,
+            placement=effective_placement,
         )
         if self.local_expert_ids is not None:
             logger.info_once(

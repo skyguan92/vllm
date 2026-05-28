@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 
 def maybe_wrap_ipv6_address(address: str) -> str:
@@ -323,8 +323,8 @@ async def _handle_completions(api: str, request: Request):
         # Get the next prefill client in round-robin fashion
         prefill_client_info, prefill_dp_rank = get_next_client(request.app, "prefill")
 
-        # Send request to prefill service
-        asyncio.create_task(
+        # Send request to prefill service.
+        prefill_task = asyncio.create_task(
             send_request_to_service(
                 prefill_client_info, prefill_dp_rank, api, req_data, request_id
             )
@@ -332,19 +332,40 @@ async def _handle_completions(api: str, request: Request):
 
         decode_client_info = get_next_client(request.app, "decode")
 
+        async def finish_prefill_task():
+            try:
+                await prefill_task
+            except Exception:
+                import traceback
+
+                print(
+                    "Error occurred in disagg prefill proxy server "
+                    f"- prefill request for {api} endpoint"
+                )
+                print(traceback.format_exc())
+
         # Stream response from decode service
         async def generate_stream():
-            async for chunk in stream_service_response(
-                prefill_client_info,
-                prefill_dp_rank,
-                decode_client_info,
-                api,
-                req_data,
-                request_id=request_id,
-            ):
-                yield chunk
+            try:
+                async for chunk in stream_service_response(
+                    prefill_client_info,
+                    prefill_dp_rank,
+                    decode_client_info,
+                    api,
+                    req_data,
+                    request_id=request_id,
+                ):
+                    yield chunk
+            finally:
+                await finish_prefill_task()
 
-        return StreamingResponse(generate_stream(), media_type="application/json")
+        if req_data.get("stream"):
+            return StreamingResponse(generate_stream(), media_type="text/event-stream")
+
+        content = bytearray()
+        async for chunk in generate_stream():
+            content.extend(chunk)
+        return Response(content=bytes(content), media_type="application/json")
 
     except Exception as e:
         import sys

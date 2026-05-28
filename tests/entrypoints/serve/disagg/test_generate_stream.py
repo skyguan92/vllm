@@ -125,6 +125,8 @@ def _make_request_output(
     prompt_token_ids: list[int] | None = None,
     logprobs: list[dict[int, Any] | None] | None = None,
     num_cached_tokens: int | None = None,
+    num_local_cached_tokens: int | None = None,
+    num_external_cached_tokens: int | None = None,
     index: int = 0,
 ) -> RequestOutput:
     return RequestOutput(
@@ -148,6 +150,8 @@ def _make_request_output(
         encoder_prompt=None,
         encoder_prompt_token_ids=None,
         num_cached_tokens=num_cached_tokens,
+        num_local_cached_tokens=num_local_cached_tokens,
+        num_external_cached_tokens=num_external_cached_tokens,
     )
 
 
@@ -489,6 +493,8 @@ async def test_stream_prompt_tokens_details():
             finish_reason="stop",
             finished=True,
             num_cached_tokens=2,
+            num_local_cached_tokens=1,
+            num_external_cached_tokens=1,
         )
 
     engine.generate = MagicMock(side_effect=mock_generate)
@@ -512,3 +518,5 @@ async def test_stream_prompt_tokens_details():
     usage_chunk = parsed[-2]
     assert usage_chunk["choices"] == []
     assert usage_chunk["usage"]["prompt_tokens_details"]["cached_tokens"] == 2
+    assert usage_chunk["usage"]["prompt_tokens_details"]["local_cached_tokens"] == 1
+    assert usage_chunk["usage"]["prompt_tokens_details"]["external_cached_tokens"] == 1

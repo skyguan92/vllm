@@ -35,3 +35,5 @@ def test_prefix_cache_stats_is_recorded(llm):
     _ = llm.generate([input_tokens])
     outputs = llm.generate([input_tokens])
     assert outputs[0].num_cached_tokens == 16
+    assert outputs[0].num_local_cached_tokens == 16
+    assert outputs[0].num_external_cached_tokens == 0

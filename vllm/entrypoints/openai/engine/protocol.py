@@ -100,6 +100,23 @@ class ModelList(OpenAIBaseModel):
 
 class PromptTokenUsageInfo(OpenAIBaseModel):
     cached_tokens: int | None = None
+    local_cached_tokens: int | None = None
+    external_cached_tokens: int | None = None
+
+
+def prompt_token_usage_info(
+    *,
+    cached_tokens: int | None,
+    local_cached_tokens: int | None = None,
+    external_cached_tokens: int | None = None,
+) -> PromptTokenUsageInfo | None:
+    if not (cached_tokens or local_cached_tokens or external_cached_tokens):
+        return None
+    return PromptTokenUsageInfo(
+        cached_tokens=cached_tokens,
+        local_cached_tokens=local_cached_tokens,
+        external_cached_tokens=external_cached_tokens,
+    )
 
 
 class UsageInfo(OpenAIBaseModel):

@@ -79,6 +79,8 @@ _INT64_MAX = 2**63 - 1
 
 class InputTokensDetails(OpenAIBaseModel):
     cached_tokens: int
+    local_cached_tokens: int | None = None
+    external_cached_tokens: int | None = None
     input_tokens_per_turn: list[int] = Field(default_factory=list)
     cached_tokens_per_turn: list[int] = Field(default_factory=list)
 

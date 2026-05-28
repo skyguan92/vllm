@@ -175,6 +175,8 @@ class SimpleContext(ConversationContext):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
+        self.num_local_cached_tokens = 0
+        self.num_external_cached_tokens = 0
         # todo num_reasoning_tokens is not implemented yet.
         self.num_reasoning_tokens = 0
         # not implemented yet for SimpleContext
@@ -189,6 +191,8 @@ class SimpleContext(ConversationContext):
             raise ValueError("SimpleContext only supports RequestOutput.")
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
+        self.num_local_cached_tokens = output.num_local_cached_tokens or 0
+        self.num_external_cached_tokens = output.num_external_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
@@ -282,6 +286,8 @@ class ParsableContext(ConversationContext):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
+        self.num_local_cached_tokens = 0
+        self.num_external_cached_tokens = 0
         self.num_reasoning_tokens = 0
         # not implemented yet for ParsableContext
         self.all_turn_metrics: list[TurnMetrics] = []
@@ -317,6 +323,8 @@ class ParsableContext(ConversationContext):
     def append_output(self, output: RequestOutput) -> None:
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
+        self.num_local_cached_tokens = output.num_local_cached_tokens or 0
+        self.num_external_cached_tokens = output.num_external_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
@@ -538,6 +546,8 @@ class HarmonyContext(ConversationContext):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
+        self.num_local_cached_tokens = 0
+        self.num_external_cached_tokens = 0
         self.num_reasoning_tokens = 0
         self.num_tool_output_tokens = 0
 
@@ -647,6 +657,8 @@ class HarmonyContext(ConversationContext):
         if num_cached_token is not None:
             self.num_cached_tokens += num_cached_token
             self.current_turn_metrics.cached_input_tokens = num_cached_token
+        self.num_local_cached_tokens += output.num_local_cached_tokens or 0
+        self.num_external_cached_tokens += output.num_external_cached_tokens or 0
 
     def _update_decode_token_usage(self, output: RequestOutput) -> int:
         """Update token usage statistics for the decode phase of generation.

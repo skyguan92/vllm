@@ -19,6 +19,8 @@ def create_mock_request_output(
     prompt_token_ids=None,
     output_token_ids=None,
     num_cached_tokens=0,
+    num_local_cached_tokens=None,
+    num_external_cached_tokens=None,
     finished=True,
 ):
     """Helper function to create a mock RequestOutput object for testing."""
@@ -44,6 +46,8 @@ def create_mock_request_output(
         outputs=outputs,
         finished=finished,
         num_cached_tokens=num_cached_tokens,
+        num_local_cached_tokens=num_local_cached_tokens,
+        num_external_cached_tokens=num_external_cached_tokens,
     )
 
 
@@ -93,6 +97,8 @@ def test_single_turn_token_counting():
         prompt_token_ids=[1, 2, 3, 4, 5],  # 5 prompt tokens
         output_token_ids=[6, 7, 8],  # 3 output tokens
         num_cached_tokens=2,  # 2 cached tokens
+        num_local_cached_tokens=1,
+        num_external_cached_tokens=1,
     )
 
     # Append the output to the context
@@ -102,6 +108,8 @@ def test_single_turn_token_counting():
     assert context.num_prompt_tokens == 5
     assert context.num_output_tokens == 3
     assert context.num_cached_tokens == 2
+    assert context.num_local_cached_tokens == 1
+    assert context.num_external_cached_tokens == 1
     assert context.num_tool_output_tokens == 0  # No tool tokens in first turn
 
     # Verify internal state tracking
@@ -647,6 +655,8 @@ def create_simple_context_output(
     prompt="Test prompt",
     prompt_token_ids=None,
     num_cached_tokens=0,
+    num_local_cached_tokens=None,
+    num_external_cached_tokens=None,
     logprobs=None,
     finished=True,
 ):
@@ -672,6 +682,8 @@ def create_simple_context_output(
         ],
         finished=finished,
         num_cached_tokens=num_cached_tokens,
+        num_local_cached_tokens=num_local_cached_tokens,
+        num_external_cached_tokens=num_external_cached_tokens,
     )
 
 
@@ -792,6 +804,8 @@ def test_simple_context_token_counting():
             token_ids=[10, 11],
             prompt_token_ids=[1, 2, 3, 4, 5],
             num_cached_tokens=2,
+            num_local_cached_tokens=1,
+            num_external_cached_tokens=1,
         )
     )
     context.append_output(
@@ -806,6 +820,8 @@ def test_simple_context_token_counting():
     assert context.num_prompt_tokens == 5
     assert context.num_output_tokens == 3  # 2 + 1
     assert context.num_cached_tokens == 2
+    assert context.num_local_cached_tokens == 1
+    assert context.num_external_cached_tokens == 1
 
 
 def test_simple_context_final_output():

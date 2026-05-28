@@ -23,9 +23,9 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     GenerationError,
-    PromptTokenUsageInfo,
     RequestResponseMetadata,
     UsageInfo,
+    prompt_token_usage_info,
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing, clamp_prompt_logprobs
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
@@ -307,10 +307,12 @@ class ServingTokens(OpenAIServing):
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
-        if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
+        if self.enable_prompt_tokens_details:
             # This info is not available at the /coordinator level
-            usage.prompt_tokens_details = PromptTokenUsageInfo(
-                cached_tokens=final_res.num_cached_tokens
+            usage.prompt_tokens_details = prompt_token_usage_info(
+                cached_tokens=final_res.num_cached_tokens,
+                local_cached_tokens=final_res.num_local_cached_tokens,
+                external_cached_tokens=final_res.num_external_cached_tokens,
             )
 
         request_metadata.final_usage_info = usage
@@ -358,6 +360,8 @@ class ServingTokens(OpenAIServing):
         num_generated_tokens: list[int] = []
         first_iteration = True
         num_cached_tokens = None
+        num_local_cached_tokens = None
+        num_external_cached_tokens = None
         sampling_params: SamplingParams = request.sampling_params
 
         include_usage, include_continuous_usage = should_include_usage(
@@ -372,6 +376,8 @@ class ServingTokens(OpenAIServing):
                     if res.encoder_prompt_token_ids is not None:
                         num_prompt_tokens += len(res.encoder_prompt_token_ids)
                     num_cached_tokens = res.num_cached_tokens
+                    num_local_cached_tokens = res.num_local_cached_tokens
+                    num_external_cached_tokens = res.num_external_cached_tokens
                     num_generated_tokens = [0] * len(res.outputs)
                     first_iteration = False
 
@@ -424,9 +430,11 @@ class ServingTokens(OpenAIServing):
                 total_tokens=num_prompt_tokens + total_completion_tokens,
             )
 
-            if self.enable_prompt_tokens_details and num_cached_tokens:
-                final_usage_info.prompt_tokens_details = PromptTokenUsageInfo(
-                    cached_tokens=num_cached_tokens
+            if self.enable_prompt_tokens_details:
+                final_usage_info.prompt_tokens_details = prompt_token_usage_info(
+                    cached_tokens=num_cached_tokens,
+                    local_cached_tokens=num_local_cached_tokens,
+                    external_cached_tokens=num_external_cached_tokens,
                 )
 
             if include_usage:

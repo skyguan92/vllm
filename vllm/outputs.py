@@ -102,7 +102,11 @@ class RequestOutput:
                         None if decoder-only.
         encoder_prompt_token_ids: The token IDs of the encoder prompt.
                                   None if decoder-only.
-        num_cached_tokens: The number of tokens with prefix cache hit.
+        num_cached_tokens: The number of tokens with prefix cache hit or
+            external KV transfer.
+        num_local_cached_tokens: The number of tokens from local prefix cache.
+        num_external_cached_tokens: The number of tokens from external KV
+            transfer.
         kv_transfer_params: The params for remote K/V transfer.
     """
 
@@ -119,6 +123,8 @@ class RequestOutput:
         encoder_prompt: str | None = None,
         encoder_prompt_token_ids: list[int] | None = None,
         num_cached_tokens: int | None = None,
+        num_local_cached_tokens: int | None = None,
+        num_external_cached_tokens: int | None = None,
         *,
         kv_transfer_params: dict[str, Any] | None = None,
         # Forward compatibility, code that uses args added in new release can
@@ -140,6 +146,8 @@ class RequestOutput:
         self.encoder_prompt = encoder_prompt
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
+        self.num_local_cached_tokens = num_local_cached_tokens
+        self.num_external_cached_tokens = num_external_cached_tokens
         self.kv_transfer_params = kv_transfer_params
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
@@ -184,7 +192,9 @@ class RequestOutput:
             f"finished={self.finished}, "
             f"metrics={self.metrics}, "
             f"lora_request={self.lora_request}, "
-            f"num_cached_tokens={self.num_cached_tokens})"
+            f"num_cached_tokens={self.num_cached_tokens}, "
+            f"num_local_cached_tokens={self.num_local_cached_tokens}, "
+            f"num_external_cached_tokens={self.num_external_cached_tokens})"
         )
 
 

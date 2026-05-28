@@ -858,6 +858,8 @@ class OpenAIServingResponses(OpenAIServing):
         num_prompt_tokens = context.num_prompt_tokens
         num_generated_tokens = context.num_output_tokens
         num_cached_tokens = context.num_cached_tokens
+        num_local_cached_tokens = context.num_local_cached_tokens
+        num_external_cached_tokens = context.num_external_cached_tokens
         num_reasoning_tokens = context.num_reasoning_tokens
         # For text-based reasoning parsers (e.g., <think>...</think>),
         # HarmonyContext already counts reasoning tokens via channels.
@@ -882,6 +884,8 @@ class OpenAIServingResponses(OpenAIServing):
             total_tokens=num_prompt_tokens + num_generated_tokens,
             input_tokens_details=InputTokensDetails(
                 cached_tokens=num_cached_tokens,
+                local_cached_tokens=num_local_cached_tokens,
+                external_cached_tokens=num_external_cached_tokens,
                 input_tokens_per_turn=[
                     turn.input_tokens for turn in context.all_turn_metrics
                 ],

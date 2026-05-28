@@ -73,6 +73,15 @@ def tensor_info(tensor: torch.Tensor | None) -> dict[str, Any] | None:
     }
 
 
+def _cuda_capture_active() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    try:
+        return bool(torch.cuda.is_current_stream_capturing())
+    except Exception:
+        return False
+
+
 class _MoEWP1Profiler:
     def __init__(self) -> None:
         self.enabled = _env_bool("VLLM_MOE_WP1_PROFILE")
@@ -129,21 +138,15 @@ class _MoEWP1Profiler:
         return (self._record_index - 1) % self.sample_every == 0
 
     def should_record(self) -> bool:
+        if _cuda_capture_active():
+            return False
         with self._lock:
             return self._should_record_locked()
 
     def sync_if_needed(self) -> None:
         if not self.sync_cuda:
             return
-        if torch.cuda.is_available():
-            try:
-                # torch.cuda.synchronize() is illegal while vLLM captures CUDA
-                # graphs. Skip sync during capture and keep the profiler
-                # usable for post-capture serving requests.
-                if torch.cuda.is_current_stream_capturing():
-                    return
-            except Exception:
-                pass
+        if torch.cuda.is_available() and not _cuda_capture_active():
             torch.cuda.synchronize()
 
     def record(self, event: dict[str, Any]) -> None:

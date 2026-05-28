@@ -43,7 +43,7 @@ from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    is_local_first_rank,
+    is_global_first_rank,
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
@@ -1821,7 +1821,7 @@ def should_launch_bootstrap_server(vllm_config: VllmConfig) -> bool:
     #
     # In internal LB mode,
     # only the real global first rank need to launch the bootstrap server.
-    return is_local_first_rank() and (
+    return is_global_first_rank() and (
         parallel_config.local_engines_only or parallel_config.data_parallel_index == 0
     )
 

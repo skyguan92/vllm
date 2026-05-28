@@ -136,6 +136,14 @@ class _MoEWP1Profiler:
         if not self.sync_cuda:
             return
         if torch.cuda.is_available():
+            try:
+                # torch.cuda.synchronize() is illegal while vLLM captures CUDA
+                # graphs. Skip sync during capture and keep the profiler
+                # usable for post-capture serving requests.
+                if torch.cuda.is_current_stream_capturing():
+                    return
+            except Exception:
+                pass
             torch.cuda.synchronize()
 
     def record(self, event: dict[str, Any]) -> None:

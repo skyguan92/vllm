@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import json
 import logging
+import os
 import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import IntEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -76,6 +79,123 @@ if TYPE_CHECKING:
 
 ReqId = str  # Internal scheduler request ID
 TransferId = str  # KV transfer coordination ID (shared by P/D)
+
+
+def _mooncake_current_gpu_index() -> int:
+    if torch.cuda.is_available():
+        return int(torch.cuda.current_device())
+    return 0
+
+
+def _select_mooncake_map_entry(raw: str, label: str) -> str:
+    raw = raw.strip()
+    if not raw:
+        return ""
+
+    path = Path(raw)
+    if path.exists():
+        raw = path.read_text().strip()
+
+    idx = _mooncake_current_gpu_index()
+    if raw.startswith("{"):
+        mapping = json.loads(raw)
+        value = mapping.get(str(idx), mapping.get(idx, ""))
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f"Mooncake {label} map does not cover local GPU {idx}: {raw}"
+            )
+        return value.strip()
+
+    entries = [entry.strip() for entry in raw.split(",") if entry.strip()]
+    if len(entries) <= 1:
+        return entries[0] if entries else ""
+    if idx >= len(entries):
+        raise ValueError(
+            f"Mooncake {label} CSV does not cover local GPU {idx}: {raw}"
+        )
+    return entries[idx]
+
+
+def _get_ipv4_for_ifname(ifname: str) -> str:
+    import fcntl
+    import socket
+    import struct
+
+    ifname_b = ifname.encode("utf-8")[:15]
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        packed = struct.pack("256s", ifname_b)
+        result = fcntl.ioctl(sock.fileno(), 0x8915, packed)  # SIOCGIFADDR
+        return socket.inet_ntoa(result[20:24])
+    finally:
+        sock.close()
+
+
+def _get_mooncake_hostname() -> str:
+    raw = (
+        os.getenv("VLLM_MOONCAKE_HOSTNAME")
+        or os.getenv("MOONCAKE_HOSTNAME")
+        or os.getenv("MOONCAKE_LOCAL_IP")
+        or ""
+    ).strip()
+    if raw:
+        return raw
+
+    ifname_map = (
+        os.getenv("VLLM_MOONCAKE_HOST_IFNAME_MAP")
+        or os.getenv("MOONCAKE_HOST_IFNAME_MAP")
+        or ""
+    ).strip()
+    if ifname_map:
+        return _get_ipv4_for_ifname(
+            _select_mooncake_map_entry(ifname_map, "host-ifname")
+        )
+
+    ifname = (
+        os.getenv("VLLM_MOONCAKE_HOST_IFNAME")
+        or os.getenv("MOONCAKE_HOST_IFNAME")
+        or ""
+    ).strip()
+    if ifname:
+        return _get_ipv4_for_ifname(ifname)
+
+    return get_ip()
+
+
+def _get_mooncake_device_name() -> str:
+    raw = (
+        os.getenv("VLLM_MOONCAKE_DEVICE_NAME")
+        or os.getenv("MOONCAKE_IB_DEVICE")
+        or os.getenv("MOONCAKE_DEVICE")
+        or ""
+    ).strip()
+    if not raw:
+        return ""
+
+    path = Path(raw)
+    if path.exists():
+        raw = path.read_text().strip()
+
+    if raw.startswith("{"):
+        mapping = json.loads(raw)
+        idx = _mooncake_current_gpu_index()
+        device = mapping.get(str(idx), mapping.get(idx, ""))
+        if not isinstance(device, str) or not device.strip():
+            raise ValueError(
+                f"Mooncake device map does not cover local GPU {idx}: {raw}"
+            )
+        return device.strip()
+
+    entries = [entry.strip() for entry in raw.split(",") if entry.strip()]
+    if not entries:
+        return ""
+    if len(entries) == 1:
+        return entries[0]
+
+    idx = _mooncake_current_gpu_index()
+    if idx >= len(entries):
+        raise ValueError(f"Mooncake device CSV does not cover local GPU {idx}: {raw}")
+    return entries[idx]
 
 
 @dataclass(frozen=True)
@@ -744,7 +864,14 @@ class MooncakeConnectorWorker:
         current_platform.set_device(self.device_id)
 
         self.engine = TransferEngine()
-        self.hostname = get_ip()
+        self.hostname = _get_mooncake_hostname()
+        if self.hostname != get_ip():
+            logger.info(
+                "Mooncake connector hostname override: hostname=%s "
+                "default_get_ip=%s",
+                self.hostname,
+                get_ip(),
+            )
 
         assert (kv_transfer_config := vllm_config.kv_transfer_config)
         self.is_kv_producer: bool = kv_transfer_config.kv_role == "kv_producer"
@@ -762,7 +889,12 @@ class MooncakeConnectorWorker:
         logger.info(
             "The Mooncake Transfer Engine is using %s as its protocol.", protocol
         )
-        ret_value = self.engine.initialize(self.hostname, "P2PHANDSHAKE", protocol, "")
+        device_name = _get_mooncake_device_name()
+        if device_name:
+            logger.info("Mooncake Transfer Engine using RDMA device_name=%s", device_name)
+        ret_value = self.engine.initialize(
+            self.hostname, "P2PHANDSHAKE", protocol, device_name
+        )
         if ret_value != 0:
             raise RuntimeError("Mooncake Transfer Engine initialization failed.")
 
@@ -789,11 +921,21 @@ class MooncakeConnectorWorker:
         dp_local_rank = parallel_config.data_parallel_rank_local
         self.dp_rank = dp_local_rank if parallel_config.local_engines_only else dp_rank
         pp_size = vllm_config.parallel_config.pipeline_parallel_size
-        if pp_size > 1:
+        allow_experimental_pp = os.getenv(
+            "VLLM_MOONCAKE_ALLOW_EXPERIMENTAL_PP", ""
+        ).lower() in ("1", "true", "yes", "on")
+        if pp_size > 1 and not allow_experimental_pp:
             raise ValueError(
                 "Mooncake Transfer Engine does not support pipeline parallelism yet."
             )
         self.pp_rank = get_pp_group().rank_in_group
+        if pp_size > 1:
+            logger.warning(
+                "Using experimental Mooncake pipeline-parallel KV transfer: "
+                "pp_rank=%d pp_size=%d",
+                self.pp_rank,
+                pp_size,
+            )
 
         self.kv_caches_base_addr: list[int] = []
         self.device_kv_caches: dict[str, torch.Tensor] = {}
@@ -1004,7 +1146,7 @@ class MooncakeConnectorWorker:
         self, identity: bytes, sock: zmq.asyncio.Socket, meta: MooncakeXferMetadata
     ):
         pending_reqs: dict[ReqId, SendBlockMeta] = {}
-        remote_tp_ranks = self.transfer_topo.handshake_target_ranks(meta.remote_tp_size)
+        remote_tp_ranks = self._producer_remote_tp_ranks(meta.remote_tp_size)
         if meta.remote_tp_rank not in remote_tp_ranks:
             # This D worker does not pair with the P worker.
             msg = (
@@ -1654,10 +1796,28 @@ class MooncakeConnectorWorker:
             remote_engine_id,
             remote_tp_ranks,
         )
+        if count == 0:
+            for pull_meta in pull_metas.values():
+                self.finished_recving_reqs.add(pull_meta.d_req_id)
+            return
+
         for pull_meta in pull_metas.values():
             pull_meta.pull_tasks_count = count
         for remote_tp_rank in remote_tp_ranks:
-            worker_addr = self._remote_agents[remote_engine_id][remote_tp_rank][0]
+            pp_workers = self._remote_agents[remote_engine_id][remote_tp_rank]
+            if self.pp_rank not in pp_workers:
+                raise KeyError(
+                    "Remote Mooncake prefiller has no worker for "
+                    f"tp_rank={remote_tp_rank}, pp_rank={self.pp_rank}; "
+                    f"available_pp_ranks={sorted(pp_workers)}"
+                )
+            worker_addr = pp_workers[self.pp_rank]
+            logger.debug(
+                "Receiving Mooncake KV from remote tp_rank=%d pp_rank=%d addr=%s",
+                remote_tp_rank,
+                self.pp_rank,
+                worker_addr,
+            )
             asyncio.create_task(
                 self.receive_kv_from_single_worker(worker_addr, pull_metas)
             )
@@ -1739,6 +1899,46 @@ class MooncakeConnectorWorker:
     def _producer_cache_is_replicated(self) -> bool:
         return self.transfer_topo.local_replicates_kv_cache
 
+    def _producer_replicated_logical_tp_size(self) -> int:
+        if self.use_mla and torch.cuda.is_available():
+            return max(1, min(self.tp_size, torch.cuda.device_count()))
+
+        return max(
+            1,
+            min(self.tp_size, self.transfer_topo.total_num_kv_heads),
+        )
+
+    def _producer_replicated_remote_tp_ranks(
+        self, remote_tp_size: int
+    ) -> list[int]:
+        logical_tp_size = self._producer_replicated_logical_tp_size()
+        if logical_tp_size >= self.tp_size:
+            return self.transfer_topo.handshake_target_ranks(remote_tp_size)
+
+        if self.tp_rank >= logical_tp_size:
+            return []
+
+        if remote_tp_size >= logical_tp_size:
+            if remote_tp_size % logical_tp_size != 0:
+                return self.transfer_topo.handshake_target_ranks(remote_tp_size)
+            tp_ratio = remote_tp_size // logical_tp_size
+            start = self.tp_rank * tp_ratio
+            return list(range(start, start + tp_ratio))
+
+        if logical_tp_size % remote_tp_size != 0:
+            return self.transfer_topo.handshake_target_ranks(remote_tp_size)
+        return [self.tp_rank // (logical_tp_size // remote_tp_size)]
+
+    def _producer_remote_tp_ranks(self, remote_tp_size: int) -> list[int]:
+        if self.use_mla:
+            if self.tp_rank < remote_tp_size:
+                return [self.tp_rank]
+            return []
+
+        if self._producer_cache_is_replicated():
+            return self._producer_replicated_remote_tp_ranks(remote_tp_size)
+        return self.transfer_topo.handshake_target_ranks(remote_tp_size)
+
     def _get_transfer_regions(
         self, base_addrs: list[int], block_lens: list[int]
     ) -> list[TransferRegion]:
@@ -1755,6 +1955,15 @@ class MooncakeConnectorWorker:
         remote_tp_rank: int,
         remote_tp_size: int,
     ) -> tuple[bool, int, int, int]:
+        if self._producer_cache_is_replicated():
+            remote_tp_ranks = self._producer_remote_tp_ranks(remote_tp_size)
+            return (
+                remote_tp_rank in remote_tp_ranks,
+                0,
+                0,
+                local_kv_block_len,
+            )
+
         return _compute_sender_transfer_plan(
             local_tp_rank=self.tp_rank,
             local_tp_size=self.tp_size,
@@ -1833,7 +2042,10 @@ def get_mooncake_bootstrap_addr(vllm_config: VllmConfig) -> tuple[str, int]:
     Decoders should get addr from kv_transfer_params.
     """
     assert (parallel_config := vllm_config.parallel_config)
-    if parallel_config.local_engines_only:
+    override_host = os.getenv("VLLM_MOONCAKE_BOOTSTRAP_HOST")
+    if override_host:
+        host = override_host
+    elif parallel_config.local_engines_only:
         # In hybrid or external LB mode, connect to local server.
         host = "127.0.0.1"
     else:

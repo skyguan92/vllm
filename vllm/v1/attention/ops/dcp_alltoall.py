@@ -180,7 +180,7 @@ def _dcp_a2a_pack_send_kernel(
                 lse_val.to(send_ptr.dtype.element_ty),
             )
         else:
-            lse_bits = lse_val.to(tl.uint32, bitcast=True)
+            lse_bits = lse_val.to(tl.float32).to(tl.uint32, bitcast=True)
             lo = (lse_bits & 0xFFFF).to(tl.uint16)
             hi = ((lse_bits >> 16) & 0xFFFF).to(tl.uint16)
             tl.store(

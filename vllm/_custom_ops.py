@@ -273,6 +273,17 @@ def merge_attn_states(
     prefill_tokens_with_context: int | None = None,
     output_scale: torch.Tensor | None = None,
 ) -> None:
+    if prefill_tokens_with_context is None and output_scale is None:
+        torch.ops._C.merge_attn_states(
+            output,
+            output_lse,
+            prefix_output,
+            prefix_lse,
+            suffix_output,
+            suffix_lse,
+        )
+        return
+
     torch.ops._C.merge_attn_states(
         output,
         output_lse,

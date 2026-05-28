@@ -69,10 +69,15 @@ def merge_attn_states(
             return headdim % 4 == 0
         return headdim % 8 == 0
 
+    custom_op_supports_call = (
+        prefill_tokens_with_context is None and output_scale is None
+    )
+
     if (
         current_platform.is_cuda()
         and supported_dtypes(prefix_output)
         and supported_headdim(prefix_output)
+        and custom_op_supports_call
     ):
         from vllm._custom_ops import merge_attn_states
 

@@ -5,6 +5,7 @@ from collections.abc import Callable
 
 import torch
 
+import vllm.moe_wp1_profiler as moe_wp1_profiler
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
@@ -288,6 +289,18 @@ class BaseRouter(FusedMoERouter):
         # Capture logical ids before EPLB mapping.
         if self.capture_fn is not None:
             self.capture_fn(topk_ids)
+        moe_wp1_profiler.record_expert_histogram(
+            phase="expert_histogram_logical",
+            layer=getattr(self, "_wp1_layer_name", None),
+            topk_ids=topk_ids,
+            global_num_experts=self.global_num_experts,
+            top_k=self.top_k,
+            metadata={
+                "router": self.__class__.__name__,
+                "eplb_enabled": self.eplb_state is not None,
+                "indices_type": indices_type,
+            },
+        )
 
         # Step 4: Apply EPLB mapping
         topk_ids = self._apply_eplb_mapping(topk_ids)

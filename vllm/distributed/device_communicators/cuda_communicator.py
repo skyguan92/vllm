@@ -6,6 +6,7 @@ import torch
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
+import vllm.moe_wp1_profiler as moe_wp1_profiler
 from vllm.distributed.device_communicators.all_reduce_utils import (
     NCCL_SYMM_MEM_ALL_REDUCE_CONFIG,
     should_nccl_symm_mem_allreduce,
@@ -479,12 +480,30 @@ class CudaCommunicator(DeviceCommunicatorBase):
         """
 
         assert self.all2all_manager is not None
-        return self.all2all_manager.dispatch_router_logits(
-            hidden_states,
-            router_logits,
-            is_sequence_parallel,
-            extra_tensors,
-        )
+        with moe_wp1_profiler.profile_block(
+            "a2a_dispatch_router_logits",
+            metadata={
+                "unique_name": self.unique_name,
+                "communicator_rank": self.rank,
+                "rank_in_group": self.rank_in_group,
+                "group_world_size": self.world_size,
+                "global_rank": self.global_rank,
+                "global_world_size": self.global_world_size,
+                "all2all_manager": self.all2all_manager.__class__.__name__,
+                "is_sequence_parallel": is_sequence_parallel,
+                "hidden_states": moe_wp1_profiler.tensor_info(hidden_states),
+                "router_logits": moe_wp1_profiler.tensor_info(router_logits),
+                "extra_tensors": [
+                    moe_wp1_profiler.tensor_info(t) for t in extra_tensors or []
+                ],
+            },
+        ):
+            return self.all2all_manager.dispatch_router_logits(
+                hidden_states,
+                router_logits,
+                is_sequence_parallel,
+                extra_tensors,
+            )
 
     def dispatch(
         self,
@@ -502,13 +521,32 @@ class CudaCommunicator(DeviceCommunicatorBase):
         This is a no-op in the base class.
         """
         assert self.all2all_manager is not None
-        return self.all2all_manager.dispatch(
-            hidden_states,
-            topk_weights,
-            topk_ids,
-            is_sequence_parallel,
-            extra_tensors=extra_tensors,
-        )
+        with moe_wp1_profiler.profile_block(
+            "a2a_dispatch",
+            metadata={
+                "unique_name": self.unique_name,
+                "communicator_rank": self.rank,
+                "rank_in_group": self.rank_in_group,
+                "group_world_size": self.world_size,
+                "global_rank": self.global_rank,
+                "global_world_size": self.global_world_size,
+                "all2all_manager": self.all2all_manager.__class__.__name__,
+                "is_sequence_parallel": is_sequence_parallel,
+                "hidden_states": moe_wp1_profiler.tensor_info(hidden_states),
+                "topk_weights": moe_wp1_profiler.tensor_info(topk_weights),
+                "topk_ids": moe_wp1_profiler.tensor_info(topk_ids),
+                "extra_tensors": [
+                    moe_wp1_profiler.tensor_info(t) for t in extra_tensors or []
+                ],
+            },
+        ):
+            return self.all2all_manager.dispatch(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                is_sequence_parallel,
+                extra_tensors=extra_tensors,
+            )
 
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
@@ -518,10 +556,24 @@ class CudaCommunicator(DeviceCommunicatorBase):
         This is a no-op in the base class.
         """
         assert self.all2all_manager is not None
-        return self.all2all_manager.combine(
-            hidden_states,
-            is_sequence_parallel,
-        )
+        with moe_wp1_profiler.profile_block(
+            "a2a_combine",
+            metadata={
+                "unique_name": self.unique_name,
+                "communicator_rank": self.rank,
+                "rank_in_group": self.rank_in_group,
+                "group_world_size": self.world_size,
+                "global_rank": self.global_rank,
+                "global_world_size": self.global_world_size,
+                "all2all_manager": self.all2all_manager.__class__.__name__,
+                "is_sequence_parallel": is_sequence_parallel,
+                "hidden_states": moe_wp1_profiler.tensor_info(hidden_states),
+            },
+        ):
+            return self.all2all_manager.combine(
+                hidden_states,
+                is_sequence_parallel,
+            )
 
     def batch_isend_irecv(self, p2p_ops: list):
         pynccl_comm = self.pynccl_comm

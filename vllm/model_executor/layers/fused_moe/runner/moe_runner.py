@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn.functional as F
 
+import vllm.moe_wp1_profiler as moe_wp1_profiler
 from vllm.distributed import (
     get_ep_group,
     get_pcp_group,
@@ -264,6 +265,7 @@ class MoERunner(MoERunnerInterface):
 
         # Needed for string -> FusedMoE layer lookup in custom ops.
         self.layer_name = layer_name
+        self.router._wp1_layer_name = layer_name  # type: ignore[attr-defined]
 
         self._forward_entry = self._select_forward()
 
@@ -495,6 +497,37 @@ class MoERunner(MoERunnerInterface):
             assert shared_experts_input is not None
             self._shared_experts.apply(shared_experts_input, order)
 
+    def _wp1_layer_name(self, layer: torch.nn.Module) -> str:
+        return getattr(layer, "layer_name", self.layer_name)
+
+    def _wp1_quant_metadata(
+        self,
+        *,
+        layer: torch.nn.Module,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None,
+    ) -> dict[str, object]:
+        quant_method = self._quant_method
+        moe_kernel = getattr(quant_method, "moe_kernel", None)
+        return {
+            "layer_class": layer.__class__.__name__,
+            "quant_method": quant_method.__class__.__name__,
+            "moe_kernel": None if moe_kernel is None else moe_kernel.__class__.__name__,
+            "moe_backend": str(self.moe_config.moe_backend),
+            "is_monolithic": quant_method.is_monolithic,
+            "supports_internal_mk": quant_method.supports_internal_mk,
+            "dp_size": self.moe_config.dp_size,
+            "tp_size": self.moe_config.tp_size,
+            "ep_size": self.moe_config.ep_size,
+            "sp_size": self.moe_config.sp_size,
+            "pcp_size": self.moe_config.pcp_size,
+            "is_sequence_parallel": self.moe_config.is_sequence_parallel,
+            "hidden_states": moe_wp1_profiler.tensor_info(hidden_states),
+            "router_logits": moe_wp1_profiler.tensor_info(router_logits),
+            "input_ids": moe_wp1_profiler.tensor_info(input_ids),
+        }
+
     def _apply_quant_method(
         self,
         layer: torch.nn.Module,
@@ -513,30 +546,58 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
+        layer_name = self._wp1_layer_name(layer)
+        profile_metadata = self._wp1_quant_metadata(
+            layer=layer,
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            input_ids=input_ids,
+        )
+
         if self._quant_method.is_monolithic:
-            fused_out = self._quant_method.apply_monolithic(
-                layer=layer,
-                x=hidden_states,
-                router_logits=router_logits,
-                input_ids=input_ids,
-            )
+            with moe_wp1_profiler.profile_block(
+                "moe_kernel_monolithic",
+                layer=layer_name,
+                metadata=profile_metadata,
+            ):
+                fused_out = self._quant_method.apply_monolithic(
+                    layer=layer,
+                    x=hidden_states,
+                    router_logits=router_logits,
+                    input_ids=input_ids,
+                )
         else:
-            topk_weights, topk_ids = self.router.select_experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                input_ids=input_ids,
-            )
+            with moe_wp1_profiler.profile_block(
+                "router_select",
+                layer=layer_name,
+                metadata=profile_metadata,
+            ):
+                topk_weights, topk_ids = self.router.select_experts(
+                    hidden_states=hidden_states,
+                    router_logits=router_logits,
+                    input_ids=input_ids,
+                )
 
             # Passing shared_experts_input in case SharedExpertsOrder is
             # MK_INTERNAL_OVERLAPPED.
-            fused_out = self._quant_method.apply(
-                layer=layer,
-                x=hidden_states,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                shared_experts=self._shared_experts,
-                shared_experts_input=shared_experts_input,
-            )
+            expert_metadata = {
+                **profile_metadata,
+                "topk_weights": moe_wp1_profiler.tensor_info(topk_weights),
+                "topk_ids": moe_wp1_profiler.tensor_info(topk_ids),
+            }
+            with moe_wp1_profiler.profile_block(
+                "expert_kernel",
+                layer=layer_name,
+                metadata=expert_metadata,
+            ):
+                fused_out = self._quant_method.apply(
+                    layer=layer,
+                    x=hidden_states,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    shared_experts=self._shared_experts,
+                    shared_experts_input=shared_experts_input,
+                )
 
         self._maybe_apply_shared_experts(
             shared_experts_input,

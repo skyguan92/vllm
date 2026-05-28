@@ -20,11 +20,12 @@ Reference: https://arxiv.org/abs/2507.07120
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.distributed as dist
 
+import vllm.moe_wp1_profiler as moe_wp1_profiler
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.workspace import (
     current_workspace_manager,
@@ -34,6 +35,52 @@ from vllm.v1.worker.workspace import (
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
     from vllm.v1.attention.ops.common import CPTritonContext
+
+
+def _dcp_a2a_profile_metadata(
+    *,
+    cp_attn_out: torch.Tensor,
+    cp_attn_lse: torch.Tensor,
+    cp_group: GroupCoordinator,
+    world_size: int,
+    num_tokens: int,
+    total_heads: int,
+    head_dim: int,
+    heads_per_rank: int,
+    lse_pack_dim: int,
+    return_lse: bool,
+    is_lse_base_on_e: bool,
+    send_buffer: torch.Tensor | None = None,
+    recv_buffer: torch.Tensor | None = None,
+) -> dict[str, Any] | None:
+    if not moe_wp1_profiler.enabled():
+        return None
+
+    payload_elements_per_peer = num_tokens * heads_per_rank * (
+        head_dim + lse_pack_dim
+    )
+    payload_bytes_per_peer = payload_elements_per_peer * cp_attn_out.element_size()
+    return {
+        "collective": "dcp_a2a",
+        "group_unique_name": getattr(cp_group, "unique_name", None),
+        "group_rank": getattr(cp_group, "rank_in_group", None),
+        "group_world_size": world_size,
+        "global_rank": getattr(cp_group, "rank", None),
+        "num_tokens": num_tokens,
+        "total_heads": total_heads,
+        "head_dim": head_dim,
+        "heads_per_rank": heads_per_rank,
+        "lse_pack_dim": lse_pack_dim,
+        "payload_elements_per_peer": payload_elements_per_peer,
+        "payload_bytes_per_peer": payload_bytes_per_peer,
+        "payload_bytes_total": payload_bytes_per_peer * world_size,
+        "return_lse": return_lse,
+        "is_lse_base_on_e": is_lse_base_on_e,
+        "cp_attn_out": moe_wp1_profiler.tensor_info(cp_attn_out),
+        "cp_attn_lse": moe_wp1_profiler.tensor_info(cp_attn_lse),
+        "send_buffer": moe_wp1_profiler.tensor_info(send_buffer),
+        "recv_buffer": moe_wp1_profiler.tensor_info(recv_buffer),
+    }
 
 
 def _lse_weighted_combine(
@@ -435,24 +482,56 @@ def dcp_a2a_lse_reduce(
         dtype=cp_attn_out.dtype,
     )
 
-    _dcp_a2a_pack_send(
-        cp_attn_out,
-        cp_attn_lse,
-        send_buffer,
-        world_size,
-        H_per_rank,
-        D,
-        lse_pack_dim,
+    metadata = _dcp_a2a_profile_metadata(
+        cp_attn_out=cp_attn_out,
+        cp_attn_lse=cp_attn_lse,
+        cp_group=cp_group,
+        world_size=world_size,
+        num_tokens=B,
+        total_heads=H,
+        head_dim=D,
+        heads_per_rank=H_per_rank,
+        lse_pack_dim=lse_pack_dim,
+        return_lse=return_lse,
+        is_lse_base_on_e=is_lse_base_on_e,
+        send_buffer=send_buffer,
+        recv_buffer=recv_buffer,
     )
 
-    work = dist.all_to_all_single(
-        recv_buffer.view(-1),
-        send_buffer.view(-1),
-        group=cp_group.device_group,
-        async_op=True,
-    )
-    work.wait()
+    with moe_wp1_profiler.profile_block(
+        "dcp_a2a_lse_reduce",
+        metadata=metadata,
+    ):
+        with moe_wp1_profiler.profile_block(
+            "dcp_a2a_pack_send",
+            metadata=metadata,
+        ):
+            _dcp_a2a_pack_send(
+                cp_attn_out,
+                cp_attn_lse,
+                send_buffer,
+                world_size,
+                H_per_rank,
+                D,
+                lse_pack_dim,
+            )
 
-    return _dcp_a2a_unpack_combine(
-        recv_buffer, D, lse_pack_dim, return_lse, is_lse_base_on_e
-    )
+        with moe_wp1_profiler.profile_block(
+            "dcp_a2a_all_to_all_single",
+            metadata=metadata,
+        ):
+            work = dist.all_to_all_single(
+                recv_buffer.view(-1),
+                send_buffer.view(-1),
+                group=cp_group.device_group,
+                async_op=True,
+            )
+            work.wait()
+
+        with moe_wp1_profiler.profile_block(
+            "dcp_a2a_unpack_combine",
+            metadata=metadata,
+        ):
+            return _dcp_a2a_unpack_combine(
+                recv_buffer, D, lse_pack_dim, return_lse, is_lse_base_on_e
+            )

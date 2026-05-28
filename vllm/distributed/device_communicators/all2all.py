@@ -8,6 +8,7 @@ import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
+import vllm.moe_wp1_profiler as moe_wp1_profiler
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -36,6 +37,33 @@ if has_flashinfer_nvlink_one_sided():
 
 
 logger = init_logger(__name__)
+
+
+def _agrs_profile_metadata(
+    *,
+    collective: str,
+    dist_group,
+    sizes: list[int],
+    tensors: list[torch.Tensor],
+    is_sequence_parallel: bool,
+    extra_tensor_count: int = 0,
+) -> dict[str, Any] | None:
+    if not moe_wp1_profiler.enabled():
+        return None
+    return {
+        "all2all_impl": "allgather_reducescatter",
+        "collective": collective,
+        "dist_group_class": dist_group.__class__.__name__,
+        "dist_group_rank": getattr(dist_group, "rank_in_group", None),
+        "dist_group_world_size": getattr(dist_group, "world_size", None),
+        "is_sequence_parallel": is_sequence_parallel,
+        "sizes": list(sizes),
+        "sizes_sum": sum(sizes),
+        "sizes_min": min(sizes) if sizes else None,
+        "sizes_max": max(sizes) if sizes else None,
+        "extra_tensor_count": extra_tensor_count,
+        "tensors": [moe_wp1_profiler.tensor_info(tensor) for tensor in tensors],
+    }
 
 
 class AgRsAll2AllManager(All2AllManagerBase):
@@ -71,11 +99,22 @@ class AgRsAll2AllManager(All2AllManagerBase):
         if extra_tensors is not None:
             tensors_to_gather.extend(extra_tensors)
 
-        gathered_tensors = dist_group.all_gatherv(
-            tensors_to_gather,
-            dim=0,
-            sizes=sizes,
-        )
+        with moe_wp1_profiler.profile_block(
+            "a2a_dispatch_router_logits",
+            metadata=_agrs_profile_metadata(
+                collective="all_gatherv",
+                dist_group=dist_group,
+                sizes=sizes,
+                tensors=tensors_to_gather,
+                is_sequence_parallel=is_sequence_parallel,
+                extra_tensor_count=len(extra_tensors) if extra_tensors else 0,
+            ),
+        ):
+            gathered_tensors = dist_group.all_gatherv(
+                tensors_to_gather,
+                dim=0,
+                sizes=sizes,
+            )
 
         if extra_tensors is not None:
             return (gathered_tensors[0], gathered_tensors[1], gathered_tensors[2:])
@@ -106,11 +145,22 @@ class AgRsAll2AllManager(All2AllManagerBase):
         if extra_tensors is not None:
             tensors_to_gather.extend(extra_tensors)
 
-        gathered_tensors = dist_group.all_gatherv(
-            tensors_to_gather,
-            dim=0,
-            sizes=sizes,
-        )
+        with moe_wp1_profiler.profile_block(
+            "a2a_dispatch",
+            metadata=_agrs_profile_metadata(
+                collective="all_gatherv",
+                dist_group=dist_group,
+                sizes=sizes,
+                tensors=tensors_to_gather,
+                is_sequence_parallel=is_sequence_parallel,
+                extra_tensor_count=len(extra_tensors) if extra_tensors else 0,
+            ),
+        ):
+            gathered_tensors = dist_group.all_gatherv(
+                tensors_to_gather,
+                dim=0,
+                sizes=sizes,
+            )
 
         hidden_states = gathered_tensors[0]
         topk_weights = gathered_tensors[1]
@@ -133,7 +183,19 @@ class AgRsAll2AllManager(All2AllManagerBase):
         assert sizes is not None
 
         dist_group = get_ep_group() if is_sequence_parallel else get_dp_group()
-        hidden_states = dist_group.reduce_scatterv(hidden_states, dim=0, sizes=sizes)
+        with moe_wp1_profiler.profile_block(
+            "a2a_combine",
+            metadata=_agrs_profile_metadata(
+                collective="reduce_scatterv",
+                dist_group=dist_group,
+                sizes=sizes,
+                tensors=[hidden_states],
+                is_sequence_parallel=is_sequence_parallel,
+            ),
+        ):
+            hidden_states = dist_group.reduce_scatterv(
+                hidden_states, dim=0, sizes=sizes
+            )
         return hidden_states
 
     def destroy(self):
